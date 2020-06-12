@@ -1,3 +1,5 @@
+#Date: 13-05-2020
+
 library(text2vec)  
 library(data.table) 
 library(stringr)
@@ -8,7 +10,7 @@ library(ggplot2)
 
 
 ##initial
-alltags <- fread("alltranstags_phrase.csv")
+#alltags <- fread("alltranstags_phrase.csv")
 train <- fread("alltranstags_phrase.csv")
 
 ##prepare train set and test set
@@ -42,6 +44,25 @@ stop_words<-stop_words[-147:-149]
 #stop_words2<- stopwords(language = "en", source = "smart")
 system.time(vocab <- create_vocabulary(it_train ,stopwords = stop_words))
 
+#=========only keep emotion corpus====
+#"emotion_terms_list_statistic.csv" is a collection of emotion terms from multiple sources
+emo_terms = fread("emotion_terms_list_statistic.csv")
+pruned_vocab= vocab[vocab$term %in% emo_terms$term,]
+pruned_vocab = prune_vocabulary(pruned_vocab,   
+                                doc_count_min= 100)  
+#In out trial, 106 emotion terms are left
+#=========End of only keep emotion corpus====
+
+#=====Remove some non-related words====
+term_ex = fread("non-related_terms.csv")
+term_ex_list = c(term_ex$judge,term_ex$ambigu,term_ex$redun,term_ex$phrase)
+pruned_vocab= vocab[!vocab$term %in% term_ex_list,]
+pruned_vocab = prune_vocabulary(pruned_vocab,   
+                                term_count_min = 1000,   
+                                doc_proportion_max = 0.8,  
+                                doc_proportion_min = 0.0002)  
+
+#=====End of Removing some non-related words====
 ##remove low-freq and high-freq words
 pruned_vocab = prune_vocabulary(vocab,   
                                 term_count_min = 1000,   
@@ -57,17 +78,36 @@ system.time(dtm_train <- create_dtm(it_train, vectorizer))
 
 #==== generate TCM(term-co-occurrence matrix). ====
 system.time(tcm_train <- create_tcm(it_train, vectorizer, skip_grams_window = 5L,
-                                    skip_grams_window_context = c("symmetric","right","left")))
+                                    skip_grams_window_context = c("right")))
+#skip_grams_window_context = c("symmetric")
 
+#sometimes, the matrix induce big cost when training. 
+#But in my experiment, normalization impact the training result badly
+temp = as.matrix(tcm_train)
+temp1 = log(tcm_train+1)
 dtm_train_l1_norm = normalize(dtm_train, "l1")
-tcm_train_l1_norm = normalize(tcm_train, "l1")
+temp2 = normalize(tcm_train, "l2")
+temp1 = normalize(dtm_train, "l1")
 #====LSA model====
-#tfidf = TfIdf$new()
-#lsa = LSA$new(n_topics = 10)
-#track_embedding = dtm_train %>% 
-#  fit_transform(tfidf) %>% 
+#In LSA model, result "lsa$components" is the topic-term matrix. 
+#We can transpose it and regard it as word vectors
+tfidf = TfIdf$new()
+lsa = LSA$new(n_topics = 4)
+track_embedding =  fit_transform(dtm_train, tfidf)
+track_embedding2 =  fit_transform(track_embedding, lsa)
+# track_embedding = dtm_train %>%
+#  fit_transform(tfidf) %>%
 #  fit_transform(lsa)
-#temp <- lsa$components
+temp <- lsa$components
+word_vectors <- t(temp)
+eterms_df <- fread("./emotion_terms_list2.csv")
+sub_wordvec <- subset(word_vectors, rownames(word_vectors) %in% eterms_df$term)
+sub_wordvec <- sub_wordvec[order(rownames(sub_wordvec)),]
+wordvec_df <- as.data.frame(word_vectors)
+wordvec_df$term <- pruned_vocab$term
+#fwrite(as.data.frame(word_vectors), "wordvec_<size>.csv")
+fwrite(wordvec_df, "phrase_emotion_only_LSA_D4.csv")
+#====The end of LSA model====
 
 #====LDA model====
 #In LDA model, when setting topic number is 10, it looks good in 4 quadrants.
@@ -97,8 +137,12 @@ tcm_train_l1_norm = normalize(tcm_train, "l1")
 #====Glove model===
 #This model will use tcm as input, output is word vectors
 #You can adjust vector size
-glove = GlobalVectors$new(word_vectors_size = 100, vocabulary = pruned_vocab, x_max = 10)
-wv_main = glove$fit_transform(tcm_train, n_iter = 25, convergence_tol = 0.005)
+#glove = GlobalVectors$new(word_vectors_size = 100, vocabulary = pruned_vocab, x_max = 10)
+#wv_main = glove$fit_transform(tcm_train, n_iter = 25, convergence_tol = 0.005)
+#wv_context = glove$components
+#word_vectors = wv_main + t(wv_context)learning_rate=0.15
+glove = GlobalVectors$new(rank = 64, x_max = 10)
+wv_main = glove$fit_transform(tcm_train, n_iter = 25, convergence_tol = 0.001, n_threads = 2)
 wv_context = glove$components
 word_vectors = wv_main + t(wv_context)
 
@@ -108,13 +152,30 @@ word_vectors = wv_main + t(wv_context)
 wordvec_df <- as.data.frame(word_vectors)
 wordvec_df$term <- pruned_vocab$term
 #fwrite(as.data.frame(word_vectors), "wordvec_<size>.csv")
-fwrite(wordvec_df, "wordvec_7685_new_1.csv")
+fwrite(wordvec_df, "phrase_glove_1756_l2_D300.csv")
 
+#read any back up data
+wordvec_df <- fread("phrase_7685_right_glove_D64.csv")
+word_vectors <- as.matrix(wordvec_df[,1:64])
+rownames(word_vectors) <- wordvec_df$term
 
 #one test case for checking validation of word vector 
-#temp2 <- word_vectors["happy", , drop = FALSE]
-#cos_sim = sim2(x = word_vectors, y = temp2, method = "cosine", norm = "l2")
-#head(sort(cos_sim[,1], decreasing = TRUE),20)
+library(wordcloud)
+temp <- word_vectors["sad", , drop = FALSE]
+cos_sim = sim2(x = word_vectors, y = temp, method = "cosine", norm = "l2")
+#head(sort(cos_sim[,1], decreasing = TRUE),50)
+temp1= sort(cos_sim[,1], decreasing = TRUE)
+temp3 = as.data.frame (temp1)
+colnames(temp3)=c("freq")
+temp3$word = rownames(temp3)
+
+set.seed(1234) # for reproducibility 
+wordcloud(words = temp3$word, freq = temp3$freq, min.freq = 0.1,
+          max.words=50,random.color=TRUE, random.order=FALSE, rot.per=0.1,
+          colors=brewer.pal(8, "Dark2"))
+library(wordcloud2)
+temp4 = temp3[,c("word","freq")]
+wordcloud2(temp4, size=1.6, color=brewer.pal(8, "Dark2"))
 #====The end of Glove model====
 
 #====calculate word-word similarity====
@@ -128,7 +189,7 @@ wordvec_df$term <- rownames(wordvec_df)
 wordvec_df <- as.data.frame(fread("wordvec_7685_new.csv"))
 
 #====merge some same meaning terms====
-#Solution1: merge terms, then get sub word vectors
+##Solution1: merge terms, then get sub word vectors
 termassimilation <- function(item, df){
   termkey <- item[1]
   termset <- item[2]
@@ -143,45 +204,42 @@ rownames(a) <- a$term
 a <- a[,-1]
 sub_wordvec <- as.matrix(a)
 
-#Save merged result for future use ()
+##Save merged result for future use ()
 a$term <- rownames(a)
 fwrite(a, file="7685_merge_result_101terms_new.csv")
 
-#Get the ready-use data
+##Get the ready-use data
 a<-as.data.frame(fread("7685_merge_result_101terms.csv"))
 rownames(a) <- a$term
-#please check which column is term, then specify the column number
+##please check which column is term, then specify the column number
 a <- a[,-1]
 sub_wordvec <- as.matrix(a)
 
-#Solution2: not merge terms, get sub word vectors
+##Solution2: not merge terms, get sub word vectors
 rownames(wordvec_df)<-wordvec_df$term
 word_vectors <- as.matrix(wordvec_df[,-101])
 sub_wordvec <- subset(word_vectors, rownames(word_vectors) %in% eterms_df$term)
-
+sub_wordvec <- sub_wordvec[order(rownames(sub_wordvec)),]
 
 #2.calculate pairwise-rows cosine similarity and generate a similarity matrix
 termsim_mt <-lsa::cosine(t(sub_wordvec))
 #====The end of calculating similarity====
 
 #====MDS model====
-#In MDS model, we use dissimilarity instead of similarity.
-#When I use similarity in the begining, the model result is 0or1 dim. It is meaningless.
+##In MDS model, we use dissimilarity instead of similarity.
+##When I use similarity in the begining, the model result is 0or1 dim. It is meaningless.
 
-#get dissimilarity
+##get dissimilarity
 termdis_mt <- max(termsim_mt)-termsim_mt
-#MDS model, K is the dimension of target matrix
-system.time(mds_terms<-cmdscale(termdis_mt, k=3))
+##MDS model, K is the dimension of target matrix
+system.time(mds_terms<-cmdscale(termdis_mt, k=2))
 
 
-#Visualization
+##Visualization
 mds_terms.names = rownames(sub_wordvec)
 plot(mds_terms[,1],mds_terms[,2],type='p',pch=16,col="grey")
 text(mds_terms[,1],mds_terms[,2],mds_terms.names,adj=c(0,1),cex=.7)
-#temp = pruned_vocab[pruned_vocab$term %in% mds_terms.names,]
-#temp$term <- factor(temp$term,levels = mds_terms.names)
-#temp<- temp[order(temp$term),]
-#mds_terms.size <- as.factor(temp$term_count)
+
 #====MDS model 2====
 library(vegan)
 mds_model<-metaMDS(termdis_mt, k=2,stress=2)
